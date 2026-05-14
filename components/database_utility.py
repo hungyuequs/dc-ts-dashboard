@@ -13,16 +13,89 @@ from pathlib import Path
 #     parent_dir = os.path.dirname(current_dir)
 #     return os.path.join(parent_dir, "Database", "DC_TS_database.db")
 
-def get_database_path():
-    # 1) optional override via environment variable
-    env_path = os.getenv("DASHBOARD_DB_PATH")
-    if env_path:
-        return env_path
+import os
+import tempfile
+import shutil
+from pathlib import Path
+from urllib.request import Request, urlopen
 
-    # 2) default: database file inside repo
-    repo_root = Path(__file__).resolve().parents[1]   # components/ -> repo root
-    db_path = repo_root / "data" / "DC_TS_database.db"
-    return str(db_path)
+def _get_secret_or_env(key, default=None):
+    """Read from environment first, then Streamlit secrets."""
+    val = os.getenv(key)
+    if val:
+        return val
+    try:
+        import streamlit as st
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return default
+
+def _normalize_dropbox_url(url: str) -> str:
+    """Convert Dropbox share URL to direct-download style when possible."""
+    if not url:
+        return url
+    if "dropbox.com" in url:
+        url = url.replace("www.dropbox.com", "dl.dropboxusercontent.com")
+        url = url.replace("?dl=0", "?dl=1")
+        if "?" not in url:
+            url += "?dl=1"
+    return url
+
+def _download_file(url: str, dst: Path):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    req = Request(_normalize_dropbox_url(url), headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=300) as resp, open(dst, "wb") as f:
+        shutil.copyfileobj(resp, f)
+
+    # sanity check
+    if dst.stat().st_size < 1024 * 1024:  # <1MB likely a bad download/html
+        raise RuntimeError(f"Downloaded file is suspiciously small: {dst} ({dst.stat().st_size} bytes)")
+
+def get_database_path():
+    """
+    Resolve DB path in this order:
+    1) DASHBOARD_DB_PATH (exact file path)
+    2) local repo: ./data/DC_TS_database.db
+    3) old local layout: ../Database/DC_TS_database.db
+    4) download from DB_URL into temp directory
+    """
+    # 1) explicit path override
+    explicit = _get_secret_or_env("DASHBOARD_DB_PATH")
+    if explicit:
+        p = Path(explicit)
+        if p.exists():
+            return str(p)
+        raise FileNotFoundError(f"DASHBOARD_DB_PATH is set but file not found: {explicit}")
+
+    # 2/3) local candidates
+    repo_root = Path(__file__).resolve().parents[1]  # components/ -> repo root
+    candidates = [
+        repo_root / "data" / "DC_TS_database.db",
+        repo_root.parent / "Database" / "DC_TS_database.db",
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+
+    # 4) cloud download
+    db_url = _get_secret_or_env("DB_URL")
+    if db_url:
+        db_name = _get_secret_or_env("DB_FILENAME", "DC_TS_database.db")
+        cache_dir = Path(tempfile.gettempdir()) / "dc_ts_dashboard"
+        db_path = cache_dir / db_name
+
+        force_refresh = str(_get_secret_or_env("DB_FORCE_REFRESH", "0")) == "1"
+        if force_refresh or not db_path.exists():
+            _download_file(db_url, db_path)
+
+        return str(db_path)
+
+    raise FileNotFoundError(
+        "Database not found. Set DASHBOARD_DB_PATH or DB_URL, "
+        "or place DB in ./data/DC_TS_database.db."
+    )
 
 
 def ensure_database_exists():
