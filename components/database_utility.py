@@ -3,14 +3,27 @@
 import sqlite3
 import os
 import pandas as pd
+from pathlib import Path
 
 ######################　Basic functions for database interaction #########################
 
+# def get_database_path():
+#     """Get the path to the SQLite database file"""
+#     current_dir = os.getcwd()
+#     parent_dir = os.path.dirname(current_dir)
+#     return os.path.join(parent_dir, "Database", "DC_TS_database.db")
+
 def get_database_path():
-    """Get the path to the SQLite database file"""
-    current_dir = os.getcwd()
-    parent_dir = os.path.dirname(current_dir)
-    return os.path.join(parent_dir, "Database", "DC_TS_database.db")
+    # 1) optional override via environment variable
+    env_path = os.getenv("DASHBOARD_DB_PATH")
+    if env_path:
+        return env_path
+
+    # 2) default: database file inside repo
+    repo_root = Path(__file__).resolve().parents[1]   # components/ -> repo root
+    db_path = repo_root / "data" / "DC_TS_database.db"
+    return str(db_path)
+
 
 def ensure_database_exists():
     """Ensure the database directory and file exist"""
