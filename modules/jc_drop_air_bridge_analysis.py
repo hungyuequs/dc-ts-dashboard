@@ -340,7 +340,7 @@ class JcDropAirBridgeModule(AnalysisModule):
         
         # Download data
         st.subheader("📥 Download Data")
-        
+
         csv = display_df.to_csv(index=False)
         st.download_button(
             label="📊 Download Analysis Results (CSV)",
@@ -349,7 +349,232 @@ class JcDropAirBridgeModule(AnalysisModule):
             mime="text/csv",
             key="download_abr_data"
         )
-    
+
+        # ============================================================
+        # SECTION 2: Resistance change vs JJ length (Before vs After ABR)
+        # ============================================================
+        st.markdown("---")
+        st.header("⚡ Resistance Change vs JJ Length (Before vs After ABR)")
+
+        # Find available Dolan tables with resistance data
+        dolan_resist_tables = sorted(
+            df[df['Option'].str.contains('Dolan', case=False, na=False)]['Option'].unique()
+        )
+
+        if not dolan_resist_tables:
+            st.warning("No Dolan tables found for resistance analysis.")
+            return
+
+        st.subheader("🔧 Settings")
+
+        selected_resist_tables = st.multiselect(
+            "Select Dolan table(s):",
+            dolan_resist_tables,
+            default=[t for t in dolan_resist_tables if 'Const_W' in t] or dolan_resist_tables,
+            key=self.get_key('resist_abr_tables'),
+            help="Select which Dolan JJ measurement tables to include."
+        )
+
+        if not selected_resist_tables:
+            st.info("Select at least one Dolan table to continue.")
+            return
+
+        resist_df = df[df['Option'].isin(selected_resist_tables)].copy()
+
+        required_cols = ['Resistance', 'alt', 'dia', 'DMM error', 'Contact', 'TS']
+        missing_cols = [c for c in required_cols if c not in resist_df.columns]
+        if missing_cols:
+            st.error(f"Missing required columns: {missing_cols}")
+            return
+
+        # Quality filter — same criteria as Dolan resistance module
+        resist_df = resist_df[
+            resist_df['Resistance'].notna() &
+            (resist_df['Resistance'] > 0) &
+            (resist_df['DMM error'] == 0) &
+            (resist_df['Contact'] == '[1, 1]')
+        ].drop_duplicates(subset=['TS', 'Die', 'Wafer'])
+
+        if resist_df.empty:
+            st.warning("No valid resistance data after quality filtering.")
+            return
+
+        # JJ length range slider
+        available_alts = sorted(resist_df['alt'].dropna().unique().tolist())
+        if len(available_alts) >= 2:
+            alt_range = st.select_slider(
+                "JJ length — alt (µm):",
+                options=available_alts,
+                value=(available_alts[0], available_alts[-1]),
+                key=self.get_key('resist_abr_alt'),
+                help="Select the range of JJ lengths (alt) to include."
+            )
+            selected_alts = [v for v in available_alts if alt_range[0] <= v <= alt_range[1]]
+        else:
+            st.info(f"Only one JJ length available: {available_alts[0]} µm")
+            selected_alts = available_alts
+
+        # Bridge width multiselect
+        available_dias = sorted(resist_df['dia'].dropna().unique().tolist())
+        selected_dias = st.multiselect(
+            "Bridge width — dia (µm):",
+            available_dias,
+            default=available_dias,
+            key=self.get_key('resist_abr_dia'),
+            help="dia = bridge / undercut width."
+        )
+
+        if not selected_alts or not selected_dias:
+            st.info("Select JJ length range and bridge width to continue.")
+            return
+
+        resist_df = resist_df[
+            resist_df['alt'].isin(selected_alts) &
+            resist_df['dia'].isin(selected_dias)
+        ].copy()
+
+        # Match ABR wafer pairs from resistance data
+        abr_pairs_r = self._match_abr_wafer_pairs(resist_df)
+
+        if not abr_pairs_r:
+            st.warning("No before/after ABR wafer pairs found in the resistance data.")
+            return
+
+        # Compute mean resistance and % change per (wafer pair, alt)
+        resist_change_data = []
+        for before_wafer, after_wafer in abr_pairs_r:
+            before_r = resist_df[resist_df['Wafer'] == before_wafer]
+            after_r  = resist_df[resist_df['Wafer'] == after_wafer]
+
+            for alt_val in selected_alts:
+                b_vals = before_r[before_r['alt'] == alt_val]['Resistance']
+                a_vals = after_r[after_r['alt'] == alt_val]['Resistance']
+
+                if b_vals.empty or a_vals.empty:
+                    continue
+
+                r_before = b_vals.mean()
+                r_after  = a_vals.mean()
+                pct_change = (r_after - r_before) / r_before * 100 if r_before != 0 else 0
+
+                resist_change_data.append({
+                    'Before_Wafer': before_wafer,
+                    'After_Wafer':  after_wafer,
+                    'alt':          alt_val,
+                    'R_Before':     r_before,
+                    'R_After':      r_after,
+                    'R_Change_%':   pct_change,
+                    'n_before':     len(b_vals),
+                    'n_after':      len(a_vals),
+                })
+
+        if not resist_change_data:
+            st.warning("No overlapping alt values found between before/after ABR wafer pairs.")
+            return
+
+        rchange_df = pd.DataFrame(resist_change_data)
+        st.write(
+            f"**{len(rchange_df)} data points** — "
+            f"{len(abr_pairs_r)} wafer pair(s), {rchange_df['alt'].nunique()} JJ length(s)"
+        )
+
+        # Plot options
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            connect_r = st.checkbox(
+                "Connect points across JJ lengths",
+                value=True,
+                key=self.get_key('resist_abr_connect'),
+                help="Draw lines connecting points of the same wafer pair"
+            )
+        with col_p2:
+            show_zero = st.checkbox(
+                "Show y = 0 reference line",
+                value=True,
+                key=self.get_key('resist_abr_zero')
+            )
+
+        # Build plot — one trace per wafer pair
+        r_colors = pc.qualitative.Plotly + pc.qualitative.Set1 + pc.qualitative.Set2
+        pairs_r = sorted(rchange_df['Before_Wafer'].unique())
+        pair_color_map = {p: r_colors[i % len(r_colors)] for i, p in enumerate(pairs_r)}
+
+        fig_r = go.Figure()
+
+        for bw in pairs_r:
+            pair_df = rchange_df[rchange_df['Before_Wafer'] == bw].sort_values('alt')
+            aw = pair_df['After_Wafer'].iloc[0]
+            color = pair_color_map[bw]
+
+            fig_r.add_trace(go.Scatter(
+                x=pair_df['alt'],
+                y=pair_df['R_Change_%'],
+                mode='lines+markers' if connect_r else 'markers',
+                name=f"{bw} → {aw}",
+                marker=dict(size=9, color=color),
+                line=dict(color=color, width=1.5),
+                text=[f"{bw} → {aw}"] * len(pair_df),
+                customdata=np.column_stack([
+                    pair_df['R_Before'], pair_df['R_After'],
+                    pair_df['n_before'], pair_df['n_after']
+                ]),
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    "alt: %{x} µm<br>"
+                    "R Before: %{customdata[0]:.2f} Ω (n=%{customdata[2]:.0f})<br>"
+                    "R After: %{customdata[1]:.2f} Ω (n=%{customdata[3]:.0f})<br>"
+                    "Change: <b>%{y:.2f}%</b><extra></extra>"
+                )
+            ))
+
+        if show_zero:
+            fig_r.add_hline(y=0, line_dash='dash', line_color='gray')
+
+        fig_r.update_layout(
+            title="Resistance % Change Before vs After ABR by JJ Length",
+            xaxis_title="JJ Length — alt (µm)",
+            yaxis_title="Resistance Change (%)",
+            height=500,
+            hovermode='closest',
+            showlegend=True
+        )
+        fig_r.update_xaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
+        fig_r.update_yaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
+
+        st.plotly_chart(fig_r, use_container_width=True)
+        st.caption(
+            "**Y axis:** % resistance change = (R_after − R_before) / R_before × 100. "
+            "**X axis:** designed JJ length (alt, µm). "
+            "Each line/color is one before→after ABR wafer pair. "
+            "R_before and R_after are the mean resistance across all matching dies at each alt, "
+            "after quality filtering (DMM error = 0, Contact = [1,1], R > 0, deduplicated by TS/Die/Wafer). "
+            "Positive % = resistance increased after ABR; negative % = decreased."
+        )
+
+        # Summary table
+        st.subheader("📋 Resistance Change Summary")
+        display_r = rchange_df[[
+            'Before_Wafer', 'After_Wafer', 'alt',
+            'R_Before', 'R_After', 'R_Change_%', 'n_before', 'n_after'
+        ]].copy()
+        display_r.columns = [
+            'Before Wafer', 'After Wafer', 'alt (µm)',
+            'R Before (Ω)', 'R After (Ω)', 'Change (%)', 'N before', 'N after'
+        ]
+        st.dataframe(
+            display_r.sort_values(['Before Wafer', 'alt (µm)']).round(3),
+            use_container_width=True, hide_index=True
+        )
+
+        # Export
+        st.download_button(
+            label="📥 Download Resistance Change Data (CSV)",
+            data=display_r.to_csv(index=False),
+            file_name="abr_resistance_change.csv",
+            mime="text/csv",
+            key=self.get_key('resist_abr_download')
+        )
+
     def _match_abr_wafer_pairs(self, df):
         """
         Match wafer pairs before and after ABR
