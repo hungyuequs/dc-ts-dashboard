@@ -11,6 +11,7 @@ from plotly.subplots import make_subplots
 import numpy as np
 import os
 import sys
+import traceback
 from datetime import datetime, timedelta
 from scipy import stats
 from components.database_utility import (
@@ -18,14 +19,23 @@ from components.database_utility import (
     get_table_names, load_table_data, check_table_exists, get_table_info
 )
 
+# Set page configuration first — must be the very first Streamlit call
+st.set_page_config(
+    page_title="DC Test Structure Analysis Dashboard",
+    page_icon="🔬",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 # Try to import modules, with fallback if not available
+_MODULE_IMPORT_ERROR = None
 try:
     from modules import (
-        # DatabaseSummaryModule, 
-        OxidationAnalysisModule, 
+        # DatabaseSummaryModule,
+        OxidationAnalysisModule,
         JcDropAirBridgeModule,
-        # ManhattanJJResistanceAnalysisModule, 
-        DolanJJResistanceAnalysisModule, 
+        # ManhattanJJResistanceAnalysisModule,
+        DolanJJResistanceAnalysisModule,
         JcLinearFittingModule,
         ContactResistanceAnalysisModule,
         M1EtchBiasAnalysisModule,
@@ -41,18 +51,11 @@ try:
         ProcessParameterComparisonModule
     )
     MODULES_AVAILABLE = True
-except ImportError:
+except Exception as e:
     MODULES_AVAILABLE = False
-    st.warning("⚠️ Analysis modules not found. Please ensure modules package exists with your analysis classes.")
+    _MODULE_IMPORT_ERROR = traceback.format_exc()
 
 from components.wafer_filter import WaferFilter
-# Set page configuration
-st.set_page_config(
-    page_title="DC Test Structure Analysis Dashboard",
-    page_icon="🔬",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
 class DatabaseManager:
     """Centralized database management class"""
@@ -63,27 +66,54 @@ class DatabaseManager:
         # shows the database path in the app for debugging
         # st.write(f"Using database at: {self.db_path}")
     
+    _EXCLUDE_TABLES_DEFAULT = [
+        'Fab_Process_Parameter',
+        'MAN1_woABR_woUMP', 'MAN1_wABR_woUMP',
+        'DOL1_woABR_woUMP', 'DOL1_wABR_woUMP',
+        'DOL2_woABR_woUMP', 'DOL2_wABR_woUMP',
+    ]
+
+    @st.cache_data(ttl=300)
+    def load_all_analysis_data_full(_self, exclude_tables=None):
+        """Load ALL analysis data for every wafer once; filter in memory afterwards.
+        The cache key never changes (no wafer list), so subsequent wafer changes are instant."""
+        if exclude_tables is None:
+            exclude_tables = _self._EXCLUDE_TABLES_DEFAULT
+
+        all_tables = get_table_names()
+        analysis_tables = [t for t in all_tables if t not in exclude_tables]
+
+        combined_data = []
+        for table in analysis_tables:
+            df = load_table_data(table)
+            if not df.empty:
+                df['Option'] = table
+                combined_data.append(df)
+
+        if combined_data:
+            return pd.concat(combined_data, ignore_index=True)
+        return pd.DataFrame()
+
     @st.cache_data(ttl=300)
     def load_all_analysis_data(_self, exclude_tables=None, selected_wafers=None):
         """Load and combine all analysis data tables with optional wafer filtering"""
         if exclude_tables is None:
-            exclude_tables = ['Fab_Process_Parameter','MAN1_woABR_woUMP', 'MAN1_wABR_woUMP', 'DOL1_woABR_woUMP', 'DOL1_wABR_woUMP', 'DOL2_woABR_woUMP', 'DOL2_wABR_woUMP']
-        
+            exclude_tables = _self._EXCLUDE_TABLES_DEFAULT
+
         all_tables = get_table_names()
         analysis_tables = [t for t in all_tables if t not in exclude_tables]
 
         combined_data = []
         for table in analysis_tables:
             if selected_wafers:
-                # Use efficient wafer-based filtering at database level
                 df = _self._load_table_with_wafer_filter(table, selected_wafers)
             else:
                 df = load_table_data(table)
-            
+
             if not df.empty:
                 df['Option'] = table
                 combined_data.append(df)
-        
+
         if combined_data:
             return pd.concat(combined_data, ignore_index=True)
         return pd.DataFrame()
@@ -211,7 +241,20 @@ def main():
     
     # First, get all available wafers from Fab_Process_Parameter for the filter
     with st.sidebar:
-        
+        st.subheader("⚡ Data Loading Mode")
+        loading_mode = st.radio(
+            "Loading strategy:",
+            options=["Per selection", "All wafers (faster switching)"],
+            index=1,
+            key="loading_mode",
+            help=(
+                "Per selection: queries only selected wafers — lower memory, slower on each change.\n\n"
+                "All wafers: loads everything once, then filters in memory — instant wafer switching "
+                "after the first load, but uses more RAM."
+            ),
+        )
+        st.markdown("---")
+
         # Get all available wafers from the metadata table (lightweight query)
         fab_process_df = db_manager.load_metadata_table('Fab_Process_Parameter')
         if not fab_process_df.empty:
@@ -264,9 +307,14 @@ def main():
                 st.info("No Fab Process Parameters found for selected wafers.")
     
     
-    # Load main data ONLY for selected wafers (efficient filtering)
-    with st.spinner(f"Loading data for {len(selected_wafers)} selected wafers..."):
-        df = db_manager.load_all_analysis_data(selected_wafers=selected_wafers)
+    # Load analysis data using the strategy chosen in the sidebar
+    if loading_mode == "All wafers (faster switching)":
+        with st.spinner("Loading full dataset (cached after first load)..."):
+            df_full = db_manager.load_all_analysis_data_full()
+        df = df_full[df_full['Wafer'].isin(selected_wafers)] if not df_full.empty else pd.DataFrame()
+    else:
+        with st.spinner(f"Loading data for {len(selected_wafers)} selected wafer(s)..."):
+            df = db_manager.load_all_analysis_data(selected_wafers=selected_wafers)
     
     if df.empty:
         st.error("No data found for selected wafers! Please check your database or select different wafers.")
@@ -274,7 +322,9 @@ def main():
 
     
     if not MODULES_AVAILABLE:
-        st.error("❌ Analysis modules are not available. Please check your modules package.")
+        st.error("❌ Analysis modules failed to import. See details below.")
+        if _MODULE_IMPORT_ERROR:
+            st.code(_MODULE_IMPORT_ERROR, language="python")
         return
     
     # Define analysis modules organized by categories

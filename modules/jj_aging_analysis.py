@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.colors as pc
+from plotly.subplots import make_subplots
 from scipy import stats
 from datetime import datetime
 from .base import AnalysisModule
@@ -20,9 +21,22 @@ class JJagingModule(AnalysisModule):
     
     def render(self, df, **kwargs):
         st.header("⏰ JJ Aging Analysis")
-        
+
         # Extract selected_wafers from kwargs
         selected_wafers = kwargs.get('selected_wafers', None)
+
+        # Keep full copy for section 2 (Resistance) before any filtering
+        df_all = df.copy()
+        colors = pc.qualitative.Plotly + pc.qualitative.Set1 + pc.qualitative.Set2
+
+        def extract_day_number(wafer_name):
+            import re
+            match = re.search(r'Day(\d+)', str(wafer_name), re.IGNORECASE)
+            return int(match.group(1)) if match else 999
+
+        def extract_base_wafer_name(wafer_name):
+            import re
+            return re.sub(r'-Day\d+_', '_', str(wafer_name))
 
         # Filter data by junction type categories
         manhattan_options = df[df['Option'].str.contains('Manhattan_JJ', case=False, na=False)]['Option'].unique()
@@ -118,15 +132,7 @@ class JJagingModule(AnalysisModule):
             st.warning("⚠️ No valid data found with both processing dates and Jc values.")
             return
         
-        # Sort wafers by extracting Day number from wafer name if possible
-        def extract_day_number(wafer_name):
-            """Extract day number from wafer name like CCE2-Day3_25_1_3 -> 3"""
-            import re
-            match = re.search(r'Day(\d+)', str(wafer_name), re.IGNORECASE)
-            if match:
-                return int(match.group(1))
-            return 999  # Put wafers without Day number at the end
-        
+        # Sort wafers by day number extracted from wafer name (function defined above)
         df_filtered['day_sort_key'] = df_filtered['Wafer'].apply(extract_day_number)
         
         # Filter to only include wafers that have "Day" in their name
@@ -139,14 +145,7 @@ class JJagingModule(AnalysisModule):
         
         df_filtered = df_filtered.sort_values('day_sort_key')
         
-        # Extract base wafer name (without DayX)
-        def extract_base_wafer_name(wafer_name):
-            """Extract base wafer name by removing DayX_ pattern (e.g., CCE2-Day3_25_1_3 -> CCE2_25_1_3)"""
-            import re
-            # Remove -DayX_ pattern
-            cleaned = re.sub(r'-Day\d+_', '_', str(wafer_name))
-            return cleaned
-        
+        # Extract base wafer name without DayX (function defined above)
         df_filtered['base_wafer'] = df_filtered['Wafer'].apply(extract_base_wafer_name)
         
         # Get unique base wafer names
@@ -370,3 +369,316 @@ class JJagingModule(AnalysisModule):
         )
         
         st.caption(f"Export includes {len(export_df)} data points")
+
+        # ============================================================
+        # SECTION 2: Resistance vs Day Number
+        # ============================================================
+        st.markdown("---")
+        st.header("⚡ Resistance vs Day Number (Dolan JJ)")
+
+        dolan_resist_tables = sorted(
+            df_all[df_all['Option'].str.contains('Dolan', case=False, na=False)]['Option'].unique()
+        )
+
+        if not dolan_resist_tables:
+            st.warning("No Dolan JJ tables found in the selected wafer data.")
+            return
+
+        st.subheader("🔧 Resistance Analysis Settings")
+
+        # Step 1 — table selection
+        selected_resist_tables = st.multiselect(
+            "Select Dolan table(s):",
+            dolan_resist_tables,
+            default=[t for t in dolan_resist_tables if 'Const_W' in t] or dolan_resist_tables,
+            key=self.get_key('resist_tables'),
+            help="Dolan_Const_W tables fix JJ width; Dolan_Const_L tables fix JJ length."
+        )
+
+        if not selected_resist_tables:
+            st.info("Select at least one Dolan table above to continue.")
+            return
+
+        resist_df = df_all[df_all['Option'].isin(selected_resist_tables)].copy()
+
+        required_cols = ['Resistance', 'alt', 'dia', 'DMM error', 'Contact', 'TS']
+        missing_cols = [c for c in required_cols if c not in resist_df.columns]
+        if missing_cols:
+            st.error(f"Missing required columns: {missing_cols}")
+            return
+
+        # Quality filter — same criteria as DolanJJResistanceAnalysisModule
+        resist_df = resist_df[
+            resist_df['Resistance'].notna() &
+            (resist_df['Resistance'] > 0) &
+            (resist_df['DMM error'] == 0) &
+            (resist_df['Contact'] == '[1, 1]')
+        ].drop_duplicates(subset=['TS', 'Die', 'Wafer'])
+
+        if resist_df.empty:
+            st.warning("No valid resistance data after quality filtering.")
+            return
+
+        # Step 2 — JJ geometry selection
+        available_alts = sorted(resist_df['alt'].dropna().unique().tolist())
+        if len(available_alts) >= 2:
+            alt_range = st.select_slider(
+                "JJ length — alt (µm):",
+                options=available_alts,
+                value=(available_alts[0], available_alts[-1]),
+                key=self.get_key('resist_alt'),
+                help="Select the range of JJ lengths (alt) to include"
+            )
+            selected_alts = [v for v in available_alts if alt_range[0] <= v <= alt_range[1]]
+        else:
+            st.info(f"Only one JJ length available: {available_alts[0]} µm")
+            selected_alts = available_alts
+
+        available_dias = sorted(resist_df['dia'].dropna().unique().tolist())
+        selected_dias = st.multiselect(
+            "Bridge width — dia (µm):",
+            available_dias,
+            default=available_dias,
+            key=self.get_key('resist_dia'),
+            help="dia = bridge / undercut width"
+        )
+
+        if not selected_alts or not selected_dias:
+            st.info("Select JJ length range and bridge width to continue.")
+            return
+
+        resist_df = resist_df[
+            resist_df['alt'].isin(selected_alts) &
+            resist_df['dia'].isin(selected_dias)
+        ].copy()
+
+        # Add day number and base wafer (helpers defined at top of render)
+        resist_df['day_sort_key'] = resist_df['Wafer'].apply(extract_day_number)
+        resist_df['base_wafer'] = resist_df['Wafer'].apply(extract_base_wafer_name)
+        resist_df = resist_df[resist_df['day_sort_key'] != 999].copy()
+
+        if resist_df.empty:
+            st.warning("No wafers with DayX naming found in the filtered resistance data.")
+            return
+
+        # Wafer selection (by base name, same pattern as section 1)
+        unique_base_wafers_r = sorted(resist_df['base_wafer'].unique())
+        selected_base_wafers_r = st.multiselect(
+            "Select wafers to plot (by base name):",
+            unique_base_wafers_r,
+            default=unique_base_wafers_r,
+            key=self.get_key('resist_base_wafers')
+        )
+
+        if not selected_base_wafers_r:
+            st.warning("Please select at least one wafer to plot.")
+            return
+
+        resist_df = resist_df[resist_df['base_wafer'].isin(selected_base_wafers_r)].copy()
+
+        st.write(
+            f"**{len(resist_df)} data points** — "
+            f"{resist_df['Wafer'].nunique()} wafer(s), {resist_df['Die'].nunique()} die(s)"
+        )
+
+        # Step 3 — plot options
+        col_p1, col_p2, col_p3 = st.columns(3)
+        with col_p1:
+            color_by_r = st.selectbox(
+                "Color by:",
+                ['Die', 'base_wafer', 'Option'],
+                index=0,
+                key=self.get_key('resist_color')
+            )
+        with col_p2:
+            connect_lines = st.checkbox(
+                "Connect same Die across days",
+                value=True,
+                key=self.get_key('resist_lines'),
+                help="Lines connect the same Die position within the same base wafer"
+            )
+        with col_p3:
+            log_r = st.checkbox("Log scale Y", value=False, key=self.get_key('resist_log'))
+
+        # Build color map
+        color_col_r = color_by_r  # all options are already valid column names
+        all_color_vals = sorted(resist_df[color_col_r].dropna().astype(str).unique())
+        color_map_r = {v: colors[i % len(colors)] for i, v in enumerate(all_color_vals)}
+
+        fig_r = go.Figure()
+        shown_legend: set = set()
+
+        # One trace per (base_wafer, Die) so lines never cross different samples
+        for bw in sorted(resist_df['base_wafer'].unique()):
+            bw_df = resist_df[resist_df['base_wafer'] == bw]
+            for die in sorted(bw_df['Die'].unique()):
+                die_df = bw_df[bw_df['Die'] == die].sort_values('day_sort_key')
+
+                color_key = str(die_df[color_col_r].iloc[0])
+                assigned_color = color_map_r.get(color_key, 'gray')
+                first_occurrence = color_key not in shown_legend
+                shown_legend.add(color_key)
+
+                y_vals = np.log10(die_df['Resistance']) if log_r else die_df['Resistance']
+
+                fig_r.add_trace(go.Scatter(
+                    x=die_df['day_sort_key'],
+                    y=y_vals,
+                    mode='lines+markers' if connect_lines else 'markers',
+                    name=color_key,
+                    legendgroup=color_key,
+                    showlegend=first_occurrence,
+                    marker=dict(size=8, color=assigned_color),
+                    line=dict(color=assigned_color, width=1.5),
+                    text=(
+                        die_df['Wafer'] + ' | Die: ' + die_df['Die'].astype(str) +
+                        ' | TS: ' + die_df['TS'].astype(str) +
+                        ' | alt: ' + die_df['alt'].astype(str) +
+                        ' | dia: ' + die_df['dia'].astype(str)
+                    ),
+                    customdata=np.column_stack([
+                        die_df['Resistance'], die_df['alt'], die_df['dia']
+                    ]),
+                    hovertemplate=(
+                        '%{text}<br>'
+                        'Day: %{x}<br>'
+                        'Resistance: %{customdata[0]:.1f} Ω<br>'
+                        'alt: %{customdata[1]} µm | dia: %{customdata[2]} µm'
+                        '<extra></extra>'
+                    )
+                ))
+
+        fig_r.update_layout(
+            title="Dolan JJ Resistance vs Day Number",
+            xaxis_title="Day Number",
+            yaxis_title="log₁₀(Resistance [Ω])" if log_r else "Resistance (Ω)",
+            showlegend=True,
+            height=600,
+            hovermode='closest'
+        )
+        fig_r.update_xaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
+        fig_r.update_yaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
+
+        st.plotly_chart(fig_r, use_container_width=True)
+
+        # ---- Linear fit: aging rate per (Die, alt) ----
+        st.subheader("📈 Aging Rate vs JJ Length — per Die Linear Fit")
+        st.caption(
+            "For each (Die × JJ length) combination, a linear fit "
+            "Resistance = slope × Day + intercept is performed across all selected wafers. "
+            "Each point in the plots below is one Die."
+        )
+
+        fit_results = []
+        for (die, alt_val), group in resist_df.groupby(['Die', 'alt']):
+            x = group['day_sort_key'].values.astype(float)
+            y = group['Resistance'].values.astype(float)
+            valid = np.isfinite(x) & np.isfinite(y)
+            x, y = x[valid], y[valid]
+            if len(x) < 3:
+                continue
+            slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+            fit_results.append({
+                'Die': die,
+                'alt (µm)': alt_val,
+                'slope (Ω/day)': slope,
+                'slope_stderr': std_err,
+                'intercept (Ω)': intercept,
+                'R²': r_value ** 2,
+                'p_value': p_value,
+                'n_points': len(x),
+                'n_wafers': int(group['Wafer'].nunique()),
+            })
+
+        if not fit_results:
+            st.info("Not enough data points per (Die, JJ length) to fit (need ≥ 3 days per combination).")
+        else:
+            fit_df = pd.DataFrame(fit_results)
+
+            # Color by Die — reuse the same color palette
+            unique_dies_fit = sorted(fit_df['Die'].unique())
+            die_color_map = {d: colors[i % len(colors)] for i, d in enumerate(unique_dies_fit)}
+
+            fig_fit = make_subplots(
+                rows=1, cols=2,
+                subplot_titles=("Slope (Ω/day) vs JJ Length", "R² vs JJ Length"),
+            )
+
+            shown_fit_legend: set = set()
+            for die in unique_dies_fit:
+                die_df = fit_df[fit_df['Die'] == die].sort_values('alt (µm)')
+                color = die_color_map[die]
+                show_leg = die not in shown_fit_legend
+                shown_fit_legend.add(die)
+
+                hover = [
+                    f"Die: {row['Die']}<br>"
+                    f"alt: {row['alt (µm)']} µm<br>"
+                    f"slope: {row['slope (Ω/day)']:.4f} ± {row['slope_stderr']:.4f} Ω/day<br>"
+                    f"R²: {row['R²']:.3f}<br>"
+                    f"p: {row['p_value']:.3e}<br>"
+                    f"n = {row['n_points']} days, {row['n_wafers']} wafers"
+                    for _, row in die_df.iterrows()
+                ]
+
+                common = dict(
+                    x=die_df['alt (µm)'],
+                    mode='markers',
+                    name=str(die),
+                    legendgroup=str(die),
+                    marker=dict(size=9, color=color),
+                    text=hover,
+                    hovertemplate='%{text}<extra></extra>',
+                )
+
+                fig_fit.add_trace(
+                    go.Scatter(**common,
+                               y=die_df['slope (Ω/day)'],
+                               error_y=dict(type='data', array=die_df['slope_stderr'],
+                                            visible=True, thickness=1.5, width=5),
+                               showlegend=show_leg),
+                    row=1, col=1,
+                )
+                fig_fit.add_trace(
+                    go.Scatter(**common,
+                               y=die_df['R²'],
+                               showlegend=False),
+                    row=1, col=2,
+                )
+
+            fig_fit.add_hline(y=0, line_dash='dash', line_color='gray', row=1, col=1)
+            fig_fit.update_yaxes(range=[0, 1], row=1, col=2)
+            fig_fit.update_xaxes(title_text="JJ Length — alt (µm)", row=1, col=1)
+            fig_fit.update_xaxes(title_text="JJ Length — alt (µm)", row=1, col=2)
+            fig_fit.update_yaxes(title_text="Slope (Ω/day)", row=1, col=1)
+            fig_fit.update_yaxes(title_text="R²", row=1, col=2)
+            fig_fit.update_layout(height=450, hovermode='closest')
+
+            st.plotly_chart(fig_fit, use_container_width=True)
+
+            display_cols = ['Die', 'alt (µm)', 'slope (Ω/day)', 'slope_stderr', 'intercept (Ω)', 'R²', 'p_value', 'n_points', 'n_wafers']
+            st.dataframe(
+                fit_df[display_cols].sort_values(['alt (µm)', 'Die']).round(4),
+                use_container_width=True, hide_index=True
+            )
+
+        # Summary table
+        st.subheader("📋 Resistance Summary by Day")
+        summary_r = (
+            resist_df.groupby(['day_sort_key', 'Die'])['Resistance']
+            .agg(['mean', 'std', 'count'])
+            .reset_index()
+        )
+        summary_r.columns = ['Day', 'Die', 'Mean Resistance (Ω)', 'Std (Ω)', 'N']
+        st.dataframe(summary_r.sort_values(['Day', 'Die']).round(2), use_container_width=True, hide_index=True)
+
+        # Export
+        export_r = resist_df[['Wafer', 'Die', 'TS', 'Option', 'alt', 'dia', 'Resistance', 'day_sort_key', 'base_wafer']].copy()
+        export_r = export_r.rename(columns={'day_sort_key': 'Day_Number'})
+        st.download_button(
+            label="📥 Download Resistance Data (CSV)",
+            data=export_r.to_csv(index=False),
+            file_name="jj_aging_resistance.csv",
+            mime="text/csv",
+            key=self.get_key('resist_download')
+        )
