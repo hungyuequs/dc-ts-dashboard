@@ -49,29 +49,33 @@ class JcDropAirBridgeModule(AnalysisModule):
             # Get available options for selected category
             if jj_category == 'Dolan_JJ':
                 available_options = sorted(dolan_options)
-                default_options = [opt for opt in available_options if 'Const_W' in opt]
-                if not default_options:
-                    default_options = available_options
+                # Default: Dolan_Const_JJ_W_0.371 if available, else all Const_W options
+                preferred = 'Dolan_Const_JJ_W_0.371'
+                if preferred in available_options:
+                    default_options = [preferred]
+                else:
+                    default_options = [o for o in available_options if 'Const_W' in o] or available_options
             else:
                 available_options = sorted(manhattan_options)
                 default_options = available_options
-            
+
             if len(available_options) == 0:
                 st.warning(f"No {jj_category} options found in the data.")
                 return
-            
+
             selected_options = st.multiselect(
                 f"Select {jj_category} Options:",
                 available_options,
                 default=default_options,
-                key=self.get_key('selected_options')
+                key=self.get_key('selected_options'),
+                help="Jc is averaged across all dies and all selected options per wafer."
             )
-        
+
         if not selected_options:
             st.warning("Please select at least one option.")
             return
-        
-        # Filter data by selected options and junction type
+
+        # Filter data by selected options
         df_filtered = df[df['Option'].isin(selected_options)].copy()
         
         # Use Jc_by_die_considering_offset
@@ -114,9 +118,6 @@ class JcDropAirBridgeModule(AnalysisModule):
             delta_jc = jc_after_mean - jc_before_mean
             percent_change = (delta_jc / jc_before_mean * 100) if jc_before_mean != 0 else 0
             
-            # Get option info (assume same for both)
-            option = before_data['Option'].iloc[0]
-            
             paired_data.append({
                 'Before_Wafer': before_wafer,
                 'After_Wafer': after_wafer,
@@ -128,7 +129,7 @@ class JcDropAirBridgeModule(AnalysisModule):
                 'Percent_Change': percent_change,
                 'Dies_Before': len(before_data),
                 'Dies_After': len(after_data),
-                'Option': option
+                'Option': ', '.join(selected_options)
             })
         
         if not paired_data:
@@ -240,6 +241,14 @@ class JcDropAirBridgeModule(AnalysisModule):
 
         with col_fig1:
             st.plotly_chart(fig1, use_container_width=True)
+            st.caption(
+                "**X / Y axes:** Each point is one wafer pair. "
+                "X = mean Jc of the before-ABR wafer; Y = mean Jc of the after-ABR wafer. "
+                "Jc is `Jc_by_die_considering_offset`, averaged across all dies and all selected options. "
+                "**Red line:** free linear fit (slope + intercept). "
+                "**Green dashed:** fit forced through the origin (slope only). "
+                "**Grey dotted:** y = x reference (no change)."
+            )
 
         # ── RIGHT: bar chart of % Jc drop ────────────────────────────────────
         paired_df_sorted = paired_df.sort_values('Percent_Change')
@@ -278,6 +287,12 @@ class JcDropAirBridgeModule(AnalysisModule):
 
         with col_fig2:
             st.plotly_chart(fig2, use_container_width=True)
+            st.caption(
+                "**Y axis:** % Jc change = (Jc_after − Jc_before) / Jc_before × 100. "
+                "Bars sorted from most negative to most positive. "
+                "**Red** = Jc decreased after ABR (drop); **green** = Jc increased. "
+                "Labels show the before-ABR wafer name; hover for the full pair details."
+            )
         
         # Statistics Table
         st.subheader("📋 Detailed Wafer Pair Analysis")
