@@ -98,22 +98,25 @@ class ContactResistanceAnalysisModule(AnalysisModule):
                 st.warning("Please select at least one wafer.")
                 return
             
-            # Filter data based on selections
+            # Filter data based on selections (keep all contacts, flag validity)
             filtered_conn_data = df[
-                (df['Wafer'].isin(selected_wafers_conn)) & 
+                (df['Wafer'].isin(selected_wafers_conn)) &
                 (df['Option'].isin(selected_options_conn)) &
                 (df['Resistance'].notna()) &
-                (df['Resistance'] > 0) &  # Remove zero/negative values
-                (df['Contact'] == "[1, 1]")  # Ensure valid contacts
-            ]
-            
+                (df['Resistance'] > 0)
+            ].copy()
+            filtered_conn_data['contact_valid'] = filtered_conn_data['Contact'] == "[1, 1]"
+
             if filtered_conn_data.empty:
                 st.warning("No valid data points found with selected filters.")
                 return
-            
+
+            n_valid = filtered_conn_data['contact_valid'].sum()
+            n_invalid = (~filtered_conn_data['contact_valid']).sum()
             st.info(
                 f"Analysis data: {len(filtered_conn_data)} points from "
-                f"{filtered_conn_data['Wafer'].nunique()} wafers"
+                f"{filtered_conn_data['Wafer'].nunique()} wafers "
+                f"({n_valid} valid contact ✓, {n_invalid} invalid contact ✗)"
             )
         
         with col2:
@@ -147,70 +150,85 @@ class ContactResistanceAnalysisModule(AnalysisModule):
             
             # Filter data for this specific option
             option_data = filtered_data[filtered_data['Option'] == option]
-            
+
             if option_data.empty:
                 st.warning(f"No data available for {option}")
                 continue
-            
-            # Calculate statistics
-            mean_val = option_data['Resistance'].mean()
-            max_val = option_data['Resistance'].max()
-            min_val = option_data['Resistance'].min()
+
+            valid_data   = option_data[option_data['contact_valid']]
+            invalid_data = option_data[~option_data['contact_valid']]
+
+            # Statistics from valid contacts only
+            stat_data = valid_data if not valid_data.empty else option_data
+            mean_val  = stat_data['Resistance'].mean()
+            max_val   = stat_data['Resistance'].max()
+            min_val   = stat_data['Resistance'].min()
             summary_rows.append([option, mean_val, max_val, min_val])
-            
-            # Calculate ±20% tolerance band
+
+            # ±20% tolerance band around valid-contact mean
             lower_bound = mean_val * 0.8
             upper_bound = mean_val * 1.2
-            
-            # Create scatter plot
+
             fig = go.Figure()
-            
-            # Add tolerance band (±20%)
+
+            # Tolerance band
             fig.add_shape(
                 type="rect",
-                xref="paper", 
-                yref="y",
-                x0=0, 
-                x1=1,  # Full x-axis span
-                y0=lower_bound, 
-                y1=upper_bound,
-                fillcolor="lightgray",
-                opacity=0.3,
-                layer="below",
-                line_width=0,
+                xref="paper", yref="y",
+                x0=0, x1=1,
+                y0=lower_bound, y1=upper_bound,
+                fillcolor="lightgray", opacity=0.3,
+                layer="below", line_width=0,
             )
-            
-            # Add scatter points
-            fig.add_trace(go.Scatter(
-                x=option_data['Wafer'],
-                y=option_data['Resistance'],
-                mode='markers',
-                marker=dict(size=8, color='blue'),
-                name=option,
-                hovertemplate=(
-                    "<b>Wafer:</b> %{x}<br>"
-                    "<b>Resistance:</b> %{y:.2f} Ω<br>"
-                    "<extra></extra>"
-                )
-            ))
-            
-            # Add mean line
+
+            # Valid contacts — blue circles
+            if not valid_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=valid_data['Wafer'],
+                    y=valid_data['Resistance'],
+                    mode='markers',
+                    marker=dict(size=8, color='steelblue'),
+                    name='Valid contact [1,1]',
+                    hovertemplate=(
+                        "<b>Wafer:</b> %{x}<br>"
+                        "<b>Resistance:</b> %{y:.2f} Ω<br>"
+                        "<b>Contact:</b> valid<br>"
+                        "<extra></extra>"
+                    )
+                ))
+
+            # Invalid contacts — orange ✕
+            if not invalid_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=invalid_data['Wafer'],
+                    y=invalid_data['Resistance'],
+                    mode='markers',
+                    marker=dict(size=9, color='orange', symbol='x', opacity=0.8),
+                    name='Invalid contact ✗',
+                    hovertemplate=(
+                        "<b>Wafer:</b> %{x}<br>"
+                        "<b>Resistance:</b> %{y:.2f} Ω<br>"
+                        "<b>Contact:</b> %{customdata}<br>"
+                        "<extra></extra>"
+                    ),
+                    customdata=invalid_data['Contact']
+                ))
+
+            # Mean line (valid contacts only)
             fig.add_hline(
-                y=mean_val, 
-                line_dash="dash", 
-                line_color="red",
-                annotation_text=f"Mean = {mean_val:.2f} Ω",
+                y=mean_val,
+                line_dash="dash", line_color="red",
+                annotation_text=f"Mean (valid) = {mean_val:.2f} Ω",
                 annotation_position="right"
             )
-            
-            # Update layout
+
             fig.update_layout(
                 xaxis_title="Wafer",
                 yaxis_title="Resistance (Ω)",
                 title=f"Contact Resistance: {option}",
                 xaxis=dict(tickangle=45),
                 height=400,
-                showlegend=False,
+                showlegend=True,
                 hovermode='closest'
             )
             
