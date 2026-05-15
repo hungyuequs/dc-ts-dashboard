@@ -262,7 +262,7 @@ def main():
             if 'wafer_name' in fab_process_df.columns and 'Wafer' not in fab_process_df.columns:
                 fab_process_df = fab_process_df.rename(columns={'wafer_name': 'Wafer'})
             
-            all_wafers = sorted([w for w in fab_process_df['Wafer'].unique() if w is not None])
+            all_wafers = sorted([w for w in fab_process_df['Wafer'].unique() if pd.notna(w)])
         else:
             all_wafers = []
             st.warning("⚠️ No wafer metadata found. Loading all data...")
