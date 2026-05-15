@@ -220,7 +220,7 @@ class DataProcessor:
         return df[df['Option'].isin(selected_options)]
 
 def main():
-    st.title("🔬 DC Test Structure Analysis Dashboard - Refactored")
+    st.title("🔬 DC Test Structure Analysis Dashboard")
     st.markdown("---")
     
     # Initialize components
