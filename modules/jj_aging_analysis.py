@@ -662,6 +662,73 @@ class JJagingModule(AnalysisModule):
                 use_container_width=True, hide_index=True
             )
 
+            # ---- Normalized aging rate: slope / R₀ (%/day) vs JJ length ----
+            st.subheader("📊 Normalized Aging Rate (%/day) vs JJ Length")
+
+            valid_fit_df = fit_df[fit_df['intercept (Ω)'] > 0].copy()
+            valid_fit_df['slope_%/day'] = (
+                valid_fit_df['slope (Ω/day)'] / valid_fit_df['intercept (Ω)'] * 100
+            )
+            valid_fit_df['slope_%/day_err'] = (
+                valid_fit_df['slope_stderr'] / valid_fit_df['intercept (Ω)'] * 100
+            )
+
+            if valid_fit_df.empty:
+                st.warning("No valid normalized aging rate (all fit intercepts ≤ 0).")
+            else:
+                fig_pct = go.Figure()
+                shown_legend_pct: set = set()
+
+                for die in sorted(valid_fit_df['Die'].unique()):
+                    die_data = valid_fit_df[valid_fit_df['Die'] == die].sort_values('alt (µm)')
+                    color = die_color_map.get(die, 'gray')
+                    first_occ = die not in shown_legend_pct
+                    shown_legend_pct.add(die)
+
+                    hover = [
+                        f"Die: {row['Die']}<br>"
+                        f"alt: {row['alt (µm)']} µm<br>"
+                        f"Slope: {row['slope (Ω/day)']:.4f} Ω/day<br>"
+                        f"R₀ (intercept): {row['intercept (Ω)']:.2f} Ω<br>"
+                        f"Normalized: {row['slope_%/day']:.4f} ± {row['slope_%/day_err']:.4f} %/day<br>"
+                        f"R²: {row['R²']:.3f}"
+                        for _, row in die_data.iterrows()
+                    ]
+
+                    fig_pct.add_trace(go.Scatter(
+                        x=die_data['alt (µm)'],
+                        y=die_data['slope_%/day'],
+                        mode='markers',
+                        name=str(die),
+                        legendgroup=str(die),
+                        showlegend=first_occ,
+                        marker=dict(size=9, color=color),
+                        error_y=dict(
+                            type='data',
+                            array=die_data['slope_%/day_err'],
+                            visible=True, thickness=1.5, width=5
+                        ),
+                        text=hover,
+                        hovertemplate='%{text}<extra></extra>',
+                    ))
+
+                fig_pct.add_hline(y=0, line_dash='dash', line_color='gray')
+                fig_pct.update_xaxes(title_text="JJ Length — alt (µm)", showgrid=True, gridwidth=1, gridcolor='lightgray')
+                fig_pct.update_yaxes(title_text="Normalized Aging Rate (%/day)", showgrid=True, gridwidth=1, gridcolor='lightgray')
+                fig_pct.update_layout(
+                    title="Normalized Aging Rate (%/day) vs JJ Length — per Die",
+                    height=420, hovermode='closest'
+                )
+
+                st.plotly_chart(fig_pct, use_container_width=True)
+                st.caption(
+                    "**Y axis:** slope (Ω/day) ÷ intercept (Ω) × 100 = % resistance change per day. "
+                    "The intercept is the fitted resistance at Day 0 (R₀), used as the reference. "
+                    "Normalizing by R₀ removes the dependence on absolute resistance, "
+                    "making aging rates comparable across different JJ lengths and die positions. "
+                    "Error bars propagate the slope standard error: σ_norm = σ_slope / R₀ × 100."
+                )
+
         # Summary table
         st.subheader("📋 Resistance Summary by Day")
         summary_r = (
