@@ -174,141 +174,110 @@ class JcDropAirBridgeModule(AnalysisModule):
         
         st.write(f"Analysis based on {len(paired_df)} wafer pairs from {jj_category}")
         
-        # PLOT 1: Scatter plot - Jc Before vs After with linear fits
-        st.subheader("📈 Jc Before vs After ABR (with Linear Fits)")
-        
+        # PLOTS: side by side — scatter with linear fits  |  bar chart of % drop
+        st.subheader("📈 Jc Before vs After ABR (with Linear Fits)   |   📉 Percentage Jc Drop")
+        col_fig1, col_fig2 = st.columns(2)
+
+        # ── LEFT: Jc Before vs After scatter + linear fits ──────────────────
         fig1 = go.Figure()
-        
-        # Create color map for options
+
         unique_options = sorted(paired_df['Option'].unique())
         colors = pc.qualitative.Plotly + pc.qualitative.Set1 + pc.qualitative.Set2
         option_colors = {opt: colors[i % len(colors)] for i, opt in enumerate(unique_options)}
-        
-        # Plot each option separately for legend
+
         for option in unique_options:
             option_data = paired_df[paired_df['Option'] == option]
-            
             fig1.add_trace(go.Scatter(
                 x=option_data['Jc_Before'],
                 y=option_data['Jc_After'],
                 mode='markers',
                 name=option,
-                marker=dict(
-                    size=8,
-                    color=option_colors[option],
-                    line=dict(width=1, color='white')
-                ),
-                text=[f"{row['Before_Wafer']} → {row['After_Wafer']}<br>" +
-                      f"Before: {row['Jc_Before']:.4f} µA/µm²<br>" +
-                      f"After: {row['Jc_After']:.4f} µA/µm²<br>" +
+                marker=dict(size=8, color=option_colors[option], line=dict(width=1, color='white')),
+                text=[f"{row['Before_Wafer']} → {row['After_Wafer']}<br>"
+                      f"Before: {row['Jc_Before']:.4f} µA/µm²<br>"
+                      f"After: {row['Jc_After']:.4f} µA/µm²<br>"
                       f"Change: {row['Delta_Jc']:.4f} ({row['Percent_Change']:.1f}%)"
                       for _, row in option_data.iterrows()],
                 hovertemplate='%{text}<extra></extra>',
-                showlegend=True
             ))
-        
-        # Fit 1: Linear regression without intercept constraint
+
         x_data = paired_df['Jc_Before'].values
         y_data = paired_df['Jc_After'].values
-        coeffs = np.polyfit(x_data, y_data, 1)
-        fit_line_1 = np.poly1d(coeffs)
         x_range = np.linspace(x_data.min() * 0.95, x_data.max() * 1.05, 100)
-        y_fit_1 = fit_line_1(x_range)
-        
+
+        # Free linear fit
+        coeffs = np.polyfit(x_data, y_data, 1)
         fig1.add_trace(go.Scatter(
-            x=x_range,
-            y=y_fit_1,
-            mode='lines',
+            x=x_range, y=np.poly1d(coeffs)(x_range), mode='lines',
             name=f'Linear Fit (y={coeffs[0]:.4f}x+{coeffs[1]:.4f})',
-            line=dict(color='red', width=2),
-            hoverinfo='skip'
+            line=dict(color='red', width=2), hoverinfo='skip'
         ))
-        
-        # Fit 2: Linear regression through origin
-        # y = mx (no intercept)
-        x_data_2d = x_data.reshape(-1, 1)
+
+        # Fit through origin
         model_origin = LinearRegression(fit_intercept=False)
-        model_origin.fit(x_data_2d, y_data)
+        model_origin.fit(x_data.reshape(-1, 1), y_data)
         slope_origin = model_origin.coef_[0]
-        y_fit_2 = slope_origin * x_range
-        
         fig1.add_trace(go.Scatter(
-            x=x_range,
-            y=y_fit_2,
-            mode='lines',
+            x=x_range, y=slope_origin * x_range, mode='lines',
             name=f'Fit through Origin (y={slope_origin:.4f}x)',
-            line=dict(color='green', width=2, dash='dash'),
-            hoverinfo='skip'
+            line=dict(color='green', width=2, dash='dash'), hoverinfo='skip'
         ))
-        
-        # Add diagonal line (no change for reference)
-        min_val = min(x_data.min(), y_data.min())
-        max_val = max(x_data.max(), y_data.max())
+
+        # y = x reference
+        ext = max(x_data.max(), y_data.max()) * 1.05
         fig1.add_trace(go.Scatter(
-            x=[min_val * 0.95, max_val * 1.05],
-            y=[min_val * 0.95, max_val * 1.05],
-            mode='lines',
-            name='No Change (y=x)',
-            line=dict(color='gray', width=2, dash='dot'),
-            hoverinfo='skip',
-            showlegend=True
+            x=[x_data.min() * 0.95, ext], y=[x_data.min() * 0.95, ext],
+            mode='lines', name='No Change (y=x)',
+            line=dict(color='gray', width=2, dash='dot'), hoverinfo='skip'
         ))
-        
+
         fig1.update_layout(
-            title="Jc Before vs After ABR Process",
+            title="Jc Before vs After ABR",
             xaxis_title="Jc Before ABR (µA/µm²)",
             yaxis_title="Jc After ABR (µA/µm²)",
-            height=500,
-            hovermode='closest'
+            height=480, hovermode='closest'
         )
-        
-        st.plotly_chart(fig1, use_container_width=True)
-        
-        # PLOT 2: Percentage change vs Wafer pairs
-        st.subheader("📉 Percentage Jc Change by Wafer Pair")
-        
-        fig2 = go.Figure()
-        
-        # Sort by percentage change for better visualization
+
+        with col_fig1:
+            st.plotly_chart(fig1, use_container_width=True)
+
+        # ── RIGHT: bar chart of % Jc drop ────────────────────────────────────
         paired_df_sorted = paired_df.sort_values('Percent_Change')
-        
-        # Create wafer pair labels
-        wafer_pair_labels = [f"{row['Before_Wafer']}" for _, row in paired_df_sorted.iterrows()]
-        
-        fig2.add_trace(go.Scatter(
-            x=wafer_pair_labels,
+        bar_labels = [row['Before_Wafer'] for _, row in paired_df_sorted.iterrows()]
+        bar_colors = ['#d73027' if v < 0 else '#1a9850'
+                      for v in paired_df_sorted['Percent_Change']]
+
+        fig2 = go.Figure(go.Bar(
+            x=bar_labels,
             y=paired_df_sorted['Percent_Change'],
-            mode='markers+lines',
-            marker=dict(
-                size=10,
-                color=paired_df_sorted['Percent_Change'],
-                colorscale='RdYlGn_r',
-                showscale=True,
-                colorbar=dict(title="% Change"),
-                line=dict(width=1, color='white')
-            ),
-            line=dict(color='rgba(100,100,100,0.5)'),
-            text=[f"{row['Before_Wafer']} → {row['After_Wafer']}<br>" +
-                  f"Change: {row['Percent_Change']:.1f}%<br>" +
-                  f"Jc Before: {row['Jc_Before']:.4f}<br>" +
-                  f"Jc After: {row['Jc_After']:.4f}"
-                  for _, row in paired_df_sorted.iterrows()],
-            hovertemplate='%{text}<extra></extra>'
+            marker_color=bar_colors,
+            text=[f"{v:.1f}%" for v in paired_df_sorted['Percent_Change']],
+            textposition='outside',
+            customdata=list(zip(
+                paired_df_sorted['After_Wafer'],
+                paired_df_sorted['Jc_Before'],
+                paired_df_sorted['Jc_After'],
+            )),
+            hovertemplate=(
+                "<b>%{x}</b> → %{customdata[0]}<br>"
+                "Jc Before: %{customdata[1]:.4f} µA/µm²<br>"
+                "Jc After: %{customdata[2]:.4f} µA/µm²<br>"
+                "Change: <b>%{y:.1f}%</b><extra></extra>"
+            )
         ))
-        
-        # Add zero line reference
-        fig2.add_hline(y=0, line_dash="dash", line_color="black", annotation_text="No Change")
-        
+
+        fig2.add_hline(y=0, line_dash="dash", line_color="black")
         fig2.update_layout(
-            title="Percentage Jc Change by Wafer Pair",
-            xaxis_title="Wafer (sorted by % change)",
+            title="Jc Drop % by Wafer Pair",
+            xaxis_title="Before-ABR Wafer",
             yaxis_title="Jc Change (%)",
-            height=400,
-            hovermode='closest',
-            xaxis_tickangle=-45
+            height=480, hovermode='closest',
+            xaxis_tickangle=-45,
+            showlegend=False
         )
-        
-        st.plotly_chart(fig2, use_container_width=True)
+
+        with col_fig2:
+            st.plotly_chart(fig2, use_container_width=True)
         
         # Statistics Table
         st.subheader("📋 Detailed Wafer Pair Analysis")
